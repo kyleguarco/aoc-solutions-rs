@@ -26,4 +26,5 @@ macro_rules! input {
 mod y2022 {
     mod day1;
     mod day2;
+    mod day3;
 }
