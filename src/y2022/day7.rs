@@ -113,20 +113,21 @@ type NodeID = usize;
 
 #[derive(Clone, Debug)]
 struct File {
-	inode: NodeID,
-	size: usize,
+	_inode: NodeID,
+	_size: usize,
 	path: Path,
 }
 
 impl File {
 	fn new(inode: NodeID, size: usize, path: Path) -> Self {
-		Self { inode, size, path }
+		Self { _inode: inode, _size: size, path }
 	}
 }
 
 #[derive(Clone, Debug)]
 struct Directory {
 	inode: NodeID,
+	parent: Option<NodeID>,
 	size: usize,
 	path: Path,
 	children: Vec<NodeID>,
@@ -135,16 +136,27 @@ struct Directory {
 impl Directory {
 	fn new(inode: NodeID, size: usize, path: Path) -> Self {
 		let children = Vec::new();
-		Self { inode, size, path, children }
+		Self {
+			inode,
+			size,
+			path,
+			children,
+			parent: None,
+		}
+	}
+
+	fn with_parent(mut self, parent: NodeID) -> Self {
+		self.parent = Some(parent);
+		self
+	}
+
+	fn parent_inode(&self) -> Option<NodeID> {
+		self.parent
 	}
 
 	fn add_as_child(&mut self, inode: NodeID) {
 		self.children.push(inode);
 		self.children.sort_unstable();
-	}
-
-	fn is_child(&self, inode: NodeID) -> bool {
-		self.children.binary_search(&inode).is_ok()
 	}
 
 	fn children(&self) -> &Vec<NodeID> {
@@ -159,20 +171,6 @@ enum Node {
 }
 
 impl Node {
-	fn inode(&self) -> NodeID {
-		match self {
-			Node::File(file) => file.inode,
-			Node::Directory(dir) => dir.inode,
-		}
-	}
-
-	fn size(&self) -> usize {
-		match self {
-			Node::File(file) => file.size,
-			Node::Directory(dir) => dir.size,
-		}
-	}
-
 	fn abs_path(&self) -> &str {
 		match self {
 			Node::File(file) => file.path.abs_path(),
@@ -197,7 +195,7 @@ impl Node {
 
 #[derive(Clone, Debug)]
 struct FileSystem {
-	index: NodeID,
+	next_index: NodeID,
 	cwd: *mut Directory,
 	names: HashMap<String, NodeID>,
 	nodes: HashMap<NodeID, Node>,
@@ -206,7 +204,7 @@ struct FileSystem {
 impl FileSystem {
 	fn new() -> Self {
 		let mut fs = Self {
-			index: 0,
+			next_index: 0,
 			cwd: null_mut(),
 			names: HashMap::new(),
 			nodes: HashMap::new(),
@@ -245,13 +243,15 @@ impl FileSystem {
 			if name.starts_with("/") {
 				// Handle a case where the name is an abs_path
 				let nid = self.names.get(name).expect("Bad name");
-				let nwd = self.nodes.get_mut(nid).expect("Bad INode").as_dir_mut().expect("isn't dir");
+				let nwd =
+					self.nodes.get_mut(nid).expect("Bad INode").as_dir_mut().expect("isn't dir");
 				self.cwd = nwd as *mut Directory;
 			} else {
 				for inode in self.cwd_as_ref().children().iter().cloned() {
 					let nwd = self.nodes.get(&inode).expect("Bad INode");
 					if nwd.name() == name {
-						let nwd = self.nodes.get_mut(&inode).unwrap().as_dir_mut().expect("isn't dir");
+						let nwd =
+							self.nodes.get_mut(&inode).unwrap().as_dir_mut().expect("isn't dir");
 						self.cwd = nwd as *mut Directory;
 						return;
 					}
@@ -261,8 +261,8 @@ impl FileSystem {
 	}
 
 	fn allocate(&mut self, node: Node) {
-		self.index += 1;
-		let index = self.index;
+		self.next_index += 1;
+		let index = self.next_index;
 
 		self.cwd_as_mut().add_as_child(index);
 
@@ -271,19 +271,34 @@ impl FileSystem {
 	}
 
 	fn new_file(&mut self, name: &str, size: usize) {
-		self.cwd_as_mut().size += size;
+		// Update the size of all parent directories.
+		let mut cpd = self.cwd_as_mut();
+		loop {
+			cpd.size += size;
+			if cpd.parent_inode().is_none() {
+				break;
+			}
+			let id = cpd.parent_inode().unwrap();
+			cpd = self.nodes
+				.get_mut(&id)
+				.expect("Oops, no parent :(")
+				.as_dir_mut()
+				.expect("isn't directory");
+		}
 
 		let mut path = self.cwd_as_ref().path.clone();
 		path.child(name).expect("The name had a slash in it :(");
 
-		self.allocate(Node::File(File::new(self.index, size, path)))
+		self.allocate(Node::File(File::new(self.next_index, size, path)))
 	}
 
 	fn new_dir(&mut self, name: &str) {
 		let mut path = self.cwd_as_ref().path.clone();
 		path.child(name).expect("The name had a slash in it :(");
 
-		self.allocate(Node::Directory(Directory::new(self.index, 0, path)))
+		let parent = self.cwd_as_ref().inode;
+
+		self.allocate(Node::Directory(Directory::new(self.next_index, 0, path).with_parent(parent)))
 	}
 }
 
@@ -311,6 +326,7 @@ fn test_part1() {
 	let input = get_input("day_7_test.txt");
 
 	let fs = FileSystem::from(input.lines().map(|s| Input::try_from(s).expect("Bad Input")));
+	println!("{}", fs.cwd_as_ref().size);
 }
 
 #[test]
