@@ -1,11 +1,11 @@
-use std::{collections::HashMap, ptr::null_mut};
+use std::{collections::HashMap, fmt::Display};
 
 use crate::get_input;
 
 #[derive(Debug)]
 enum Command<'a> {
 	List,
-	Change(&'a str),
+	ChangeDirectory(&'a str),
 }
 
 impl<'a> TryFrom<&'a str> for Command<'a> {
@@ -20,7 +20,7 @@ impl<'a> TryFrom<&'a str> for Command<'a> {
 
 		match s.next().ok_or(())? {
 			"ls" => Ok(Self::List),
-			"cd" => Ok(Self::Change(s.next().ok_or(())?)),
+			"cd" => Ok(Self::ChangeDirectory(s.next().ok_or(())?)),
 			_ => Err(()),
 		}
 	}
@@ -29,8 +29,8 @@ impl<'a> TryFrom<&'a str> for Command<'a> {
 #[derive(Debug)]
 enum Input<'a> {
 	Command(Command<'a>),
-	Directory(&'a str),
-	File(usize, &'a str),
+	NewDirectory(&'a str),
+	NewFile(usize, &'a str),
 }
 
 impl<'a> TryFrom<&'a str> for Input<'a> {
@@ -42,21 +42,23 @@ impl<'a> TryFrom<&'a str> for Input<'a> {
 
 		match start {
 			"$" => Ok(Self::Command(s.try_into()?)),
-			"dir" => Ok(Self::Directory(words.next().ok_or(())?)),
+			"dir" => Ok(Self::NewDirectory(words.next().ok_or(())?)),
 			// Handle the case where the first word is a file size
 			_ => {
 				let size = start.parse::<usize>().map_err(|_| ())?;
 				let name = words.next().ok_or(())?;
-				Ok(Self::File(size, name))
+				Ok(Self::NewFile(size, name))
 			}
 		}
 	}
 }
 
 #[derive(Clone, Debug)]
-enum PathError {
-	AtRoot,
+enum IOError {
 	NameContainsSlash,
+	NotADirectory,
+	IsRoot,
+	PathDoesNotExist,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -66,271 +68,324 @@ struct Path {
 
 impl Path {
 	fn new() -> Self {
-		Self { pstr: String::from("/") }
-	}
-
-	fn abs_path(&self) -> &str {
-		&self.pstr
-	}
-
-	fn name(&self) -> &str {
-		let mut iter = self.pstr.split('/');
-		iter.next_back();
-		// SAFETY: By this point, the files have names, except for root.
-		iter.next_back().unwrap()
-	}
-
-	fn parent(&mut self) -> Result<&str, PathError> {
-		if self.abs_path() == "/" {
-			return Err(PathError::AtRoot);
+		Self {
+			pstr: String::from("/"),
 		}
-
-		self.pstr.pop(); // pop off ending "/"
-		loop {
-			if self.pstr.ends_with("/") {
-				break;
-			} else {
-				self.pstr.pop();
-			}
-		}
-
-		Ok(&self.pstr)
 	}
 
-	fn child(&mut self, name: &str) -> Result<&str, PathError> {
+	fn child(mut self, name: &str) -> Result<Self, IOError> {
 		if name.contains("/") {
-			return Err(PathError::NameContainsSlash);
+			return Err(IOError::NameContainsSlash);
 		}
 
 		self.pstr.push_str(name);
 		self.pstr.push('/');
 
-		Ok(&self.pstr)
+		Ok(self)
+	}
+}
+
+impl From<&str> for Path {
+	fn from(value: &str) -> Self {
+		Self {
+			pstr: String::from(value),
+		}
+	}
+}
+
+impl Display for Path {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "\"{}\"", self.pstr)
 	}
 }
 
 type NodeID = usize;
 
 #[derive(Clone, Debug)]
-struct File {
-	_inode: NodeID,
-	_size: usize,
-	path: Path,
-}
-
-impl File {
-	fn new(inode: NodeID, size: usize, path: Path) -> Self {
-		Self { _inode: inode, _size: size, path }
-	}
-}
-
-#[derive(Clone, Debug)]
-struct Directory {
+struct ChildDirectory {
 	inode: NodeID,
-	parent: Option<NodeID>,
+	parent: NodeID,
 	size: usize,
 	path: Path,
 	children: Vec<NodeID>,
 }
 
-impl Directory {
-	fn new(inode: NodeID, size: usize, path: Path) -> Self {
-		let children = Vec::new();
+impl ChildDirectory {
+	fn new(inode: NodeID, parent: NodeID, size: usize, path: Path) -> Self {
 		Self {
 			inode,
+			parent,
 			size,
 			path,
-			children,
-			parent: None,
+			children: Vec::new(),
 		}
 	}
 
-	fn with_parent(mut self, parent: NodeID) -> Self {
-		self.parent = Some(parent);
-		self
-	}
-
-	fn parent_inode(&self) -> Option<NodeID> {
+	fn parent_inode(&self) -> NodeID {
 		self.parent
 	}
+}
 
-	fn add_as_child(&mut self, inode: NodeID) {
-		self.children.push(inode);
-		self.children.sort_unstable();
+#[derive(Clone, Debug)]
+struct RootDirectory {
+	size: usize,
+	path: Path,
+	children: Vec<NodeID>,
+}
+
+impl RootDirectory {
+	fn new() -> Self {
+		Self {
+			size: 0,
+			path: Path::new(),
+			children: Vec::new(),
+		}
 	}
 
-	fn children(&self) -> &Vec<NodeID> {
-		&self.children
+	const fn inode(&self) -> NodeID {
+		0
+	}
+
+	fn path(&self) -> &Path {
+		&self.path
 	}
 }
 
 #[derive(Clone, Debug)]
 enum Node {
-	File(File),
-	Directory(Directory),
+	// It's constructed like this to save lines; We never reference File.
+	File((NodeID, usize, Path)),
+	Directory(ChildDirectory),
+	Root(RootDirectory),
 }
 
 impl Node {
-	fn abs_path(&self) -> &str {
+	fn add_as_child(&mut self, child: NodeID) -> Result<(), IOError> {
+		let children: &mut Vec<NodeID> = match self {
+			Self::Root(root) => &mut root.children,
+			Self::Directory(dir) => &mut dir.children,
+			Self::File(_) => return Err(IOError::NotADirectory),
+		};
+
+		children.push(child);
+
+		Ok(())
+	}
+
+	fn upsize(&mut self, upsize: usize) {
+		let size: &mut usize = match self {
+			Self::File(file) => &mut file.1,
+			Self::Directory(dir) => &mut dir.size,
+			Self::Root(root) => &mut root.size,
+		};
+
+		*size += upsize;
+	}
+
+	fn inode(&self) -> NodeID {
 		match self {
-			Node::File(file) => file.path.abs_path(),
-			Node::Directory(dir) => dir.path.abs_path(),
+			Self::File(file) => file.0,
+			Self::Directory(dir) => dir.inode,
+			Self::Root(root) => root.inode(),
 		}
 	}
 
-	fn name(&self) -> &str {
+	fn path(&self) -> &Path {
 		match self {
-			Node::File(file) => file.path.name(),
-			Node::Directory(dir) => dir.path.name(),
+			Self::File(file) => &file.2,
+			Self::Directory(dir) => &dir.path,
+			Self::Root(root) => &root.path(),
 		}
 	}
 
-	fn as_dir_mut(&mut self) -> Option<&mut Directory> {
+	fn size(&self) -> usize {
 		match self {
-			Node::File(_) => None,
-			Node::Directory(dir) => Some(dir),
+			Self::File(file) => file.1,
+			Self::Directory(dir) => dir.size,
+			Self::Root(root) => root.size,
+		}
+	}
+
+	fn is_dir(&self) -> bool {
+		match self {
+			Self::Directory(_) => true,
+			_ => false,
+		}
+	}
+
+	fn as_dir(&self) -> Option<&ChildDirectory> {
+		match self {
+			Self::File(_) => None,
+			Self::Directory(dir) => Some(dir),
+			Self::Root(_) => None,
 		}
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct FileSystem {
 	next_index: NodeID,
-	cwd: *mut Directory,
-	names: HashMap<String, NodeID>,
+	cwd: NodeID,
+	names: HashMap<Path, NodeID>,
 	nodes: HashMap<NodeID, Node>,
 }
 
 impl FileSystem {
 	fn new() -> Self {
-		let mut fs = Self {
-			next_index: 0,
-			cwd: null_mut(),
-			names: HashMap::new(),
-			nodes: HashMap::new(),
-		};
-		let root = Node::Directory(Directory::new(0, 0, Path::new()));
+		let mut names = HashMap::new();
+		let mut nodes = HashMap::new();
 
-		fs.names.insert(root.abs_path().to_owned(), 0);
-		fs.nodes.insert(0, root);
+		// Pre-allocate root before other directories.
+		let root = RootDirectory::new();
+		names.insert(root.path().clone(), root.inode());
+		nodes.insert(root.inode(), Node::Root(root));
 
-		// SAFETY: We just created this object
-		let root = fs.nodes.get_mut(&0).unwrap();
-		fs.cwd = root.as_dir_mut().unwrap() as *mut Directory;
-
-		fs
-	}
-
-	fn cwd_as_ref(&self) -> &Directory {
-		// SAFETY: `self.cwd` was set in `new` and `cd`, it will never be null.
-		unsafe { self.cwd.as_ref().expect("Oops, cwd was null :(") }
-	}
-
-	fn cwd_as_mut(&mut self) -> &mut Directory {
-		// SAFETY: `self.cwd` was set in `new` and `cd`, it will never be null.
-		unsafe { self.cwd.as_mut().expect("Oops, cwd was null :(") }
-	}
-
-	fn cd(&mut self, name: &str) {
-		if name == ".." {
-			let mut path = self.cwd_as_ref().path.clone();
-			path.parent().expect("At root?");
-			let nid = self.names.get(path.abs_path()).expect("Path not parsed right?");
-			let nwd =
-				self.nodes.get_mut(nid).expect("Bad INode cd?").as_dir_mut().expect("isn't dir");
-			self.cwd = nwd as *mut Directory;
-		} else {
-			if name.starts_with("/") {
-				// Handle a case where the name is an abs_path
-				let nid = self.names.get(name).expect("Bad name");
-				let nwd =
-					self.nodes.get_mut(nid).expect("Bad INode").as_dir_mut().expect("isn't dir");
-				self.cwd = nwd as *mut Directory;
-			} else {
-				for inode in self.cwd_as_ref().children().iter().cloned() {
-					let nwd = self.nodes.get(&inode).expect("Bad INode");
-					if nwd.name() == name {
-						let nwd =
-							self.nodes.get_mut(&inode).unwrap().as_dir_mut().expect("isn't dir");
-						self.cwd = nwd as *mut Directory;
-						return;
-					}
-				}
-			}
+		Self {
+			next_index: 1,
+			cwd: 0,
+			names,
+			nodes,
 		}
 	}
 
-	fn allocate(&mut self, node: Node) {
-		self.next_index += 1;
+	fn cwd_as_ref(&self) -> &Node {
+		// SAFETY: We know this node exists. We ensure its existence in self.cd
+		self.nodes.get(&self.cwd).unwrap()
+	}
+
+	fn cwd_as_mut(&mut self) -> &mut Node {
+		// SAFETY: We know this node exists. We ensure its existence in self.cd
+		self.nodes.get_mut(&self.cwd).unwrap()
+	}
+
+	fn nodes(&self) -> impl Iterator<Item = &Node> {
+		self.nodes.values()
+	}
+
+	fn derive_path(&self, name: &str) -> Result<Path, IOError> {
+		self.cwd_as_ref().path().clone().child(name)
+	}
+
+	fn allocate(&mut self, node: Node) -> Result<(), IOError> {
 		let index = self.next_index;
 
-		self.cwd_as_mut().add_as_child(index);
+		self.cwd_as_mut().add_as_child(index)?;
 
-		self.names.insert(node.abs_path().to_owned(), index);
+		self.names.insert(node.path().clone(), index);
 		self.nodes.insert(index, node);
+
+		self.next_index += 1;
+
+		Ok(())
 	}
 
-	fn new_file(&mut self, name: &str, size: usize) {
+	fn new_file(&mut self, name: &str, size: usize) -> Result<(), IOError> {
+		let path = self.derive_path(name)?;
+
+		self.allocate(Node::File((self.next_index, size, path)))?;
+
 		// Update the size of all parent directories.
 		let mut cpd = self.cwd_as_mut();
-		loop {
-			cpd.size += size;
-			if cpd.parent_inode().is_none() {
-				break;
-			}
-			let id = cpd.parent_inode().unwrap();
-			cpd = self.nodes
-				.get_mut(&id)
-				.expect("Oops, no parent :(")
-				.as_dir_mut()
-				.expect("isn't directory");
+		while cpd.is_dir() {
+			cpd.upsize(size);
+
+			// SAFETY: We know the current iteration of `cpd` is a directory.
+			let id = cpd.as_dir().unwrap().parent_inode();
+			cpd = self.nodes.get_mut(&id).unwrap();
 		}
+		// The final iteration asserts that `cpd` is the root directory.
+		cpd.upsize(size);
 
-		let mut path = self.cwd_as_ref().path.clone();
-		path.child(name).expect("The name had a slash in it :(");
-
-		self.allocate(Node::File(File::new(self.next_index, size, path)))
+		Ok(())
 	}
 
-	fn new_dir(&mut self, name: &str) {
-		let mut path = self.cwd_as_ref().path.clone();
-		path.child(name).expect("The name had a slash in it :(");
+	fn new_dir(&mut self, name: &str) -> Result<(), IOError> {
+		let path = self.derive_path(name)?;
 
-		let parent = self.cwd_as_ref().inode;
+		let parent = self.cwd_as_ref().inode();
 
-		self.allocate(Node::Directory(Directory::new(self.next_index, 0, path).with_parent(parent)))
+		self.allocate(Node::Directory(ChildDirectory::new(
+			self.next_index,
+			parent,
+			0,
+			path,
+		)))?;
+
+		Ok(())
+	}
+
+	fn cd(&mut self, name: &str) -> Result<(), IOError> {
+		let nid = if name == ".." {
+			self.cwd_as_ref()
+				.as_dir()
+				.ok_or(IOError::IsRoot)?
+				.parent_inode()
+		} else if name.starts_with("/") {
+			*self
+				.names
+				.get(&Path::from(name))
+				.ok_or(IOError::PathDoesNotExist)?
+		} else {
+			let path = self.derive_path(name)?;
+			*self.names.get(&path).ok_or(IOError::PathDoesNotExist)?
+		};
+
+		self.cwd = nid;
+
+		Ok(())
 	}
 }
 
-impl<'a, I: Iterator<Item = Input<'a>>> From<I> for FileSystem {
-	fn from(inputs: I) -> Self {
+// Wrapper struct to avoid issues with specialization.
+struct FSInput<I>(I);
+
+impl<'a, I: Iterator<Item = Input<'a>>> TryFrom<FSInput<I>> for FileSystem {
+	type Error = IOError;
+
+	fn try_from(inputs: FSInput<I>) -> Result<Self, Self::Error> {
 		let mut fs = Self::new();
 
-		for ip in inputs {
+		for ip in inputs.0 {
 			match ip {
 				Input::Command(cmd) => match cmd {
 					Command::List => continue,
-					Command::Change(name) => fs.cd(name),
+					Command::ChangeDirectory(name) => fs.cd(name)?,
 				},
-				Input::Directory(name) => fs.new_dir(name),
-				Input::File(size, name) => fs.new_file(name, size),
+				Input::NewDirectory(name) => fs.new_dir(name)?,
+				Input::NewFile(size, name) => fs.new_file(name, size)?,
 			}
 		}
 
-		fs
+		Ok(fs)
 	}
 }
 
 #[test]
-fn test_part1() {
-	let input = get_input("day_7_test.txt");
+fn part1() {
+	let input = get_input("day_7.txt");
 
-	let fs = FileSystem::from(input.lines().map(|s| Input::try_from(s).expect("Bad Input")));
-	println!("{}", fs.cwd_as_ref().size);
+	let mut fs = FileSystem::try_from(FSInput(
+		input
+			.lines()
+			.map(|s| Input::try_from(s).expect("Bad Input")),
+	))
+	.unwrap();
+
+	fs.cd("/").unwrap();
+	println!("Root Size: {}", fs.cwd_as_ref().size());
+
+	let sum = fs
+		.nodes()
+		.filter_map(|n| {
+			if n.is_dir() && n.size() <= 100000 {
+				Some(n.size())
+			} else {
+				None
+			}
+		})
+		.sum::<usize>();
+	println!("Directory summation: {sum}");
 }
-
-#[test]
-fn part1() {}
 
 #[test]
 fn part2() {}
