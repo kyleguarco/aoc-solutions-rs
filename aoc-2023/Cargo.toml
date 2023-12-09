@@ -1,8 +1,0 @@
-[package]
-name = "aoc-2023"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-aoc-runner.workspace = true
-aoc-runner-derive.workspace = true

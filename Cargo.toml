@@ -1,11 +1,10 @@
-[workspace]
-resolver = "2"
-members = [ "aoc-2023" ]
-
-[workspace.package]
+[package]
+name = "aoc-solutions-rs"
 version = "0.2023.0"
 edition = "2021"
 
-[workspace.dependencies]
+[lib]
+
+[dependencies]
 aoc-runner = "0.3.0"
 aoc-runner-derive = "0.3.0"
