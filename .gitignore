@@ -1,2 +1,6 @@
-/target
-/Cargo.lock
+# Visual Studio Code
+.vscode
+
+# Cargo
+target/
+Cargo.lock

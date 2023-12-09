@@ -1,8 +1,11 @@
-[package]
-name = "aoc_solutions"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [ "aoc-2023" ]
+
+[workspace.package]
+version = "0.2023.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace.dependencies]
+aoc-runner = "0.3.0"
+aoc-runner-derive = "0.3.0"
