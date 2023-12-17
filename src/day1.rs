@@ -1,41 +1,129 @@
 use aoc_runner_derive::aoc;
 
-#[aoc(day1, part1)]
-fn part1(input: &str) -> u32 {
-	fn calibrate(line: &str) -> Option<u32> {
-		let mut line = line.chars();
-		let mut find_digit = || line.find(|c| c.is_digit(10));
+fn calibrate<F>(mut find_digit: F) -> impl FnMut(&str) -> Option<u32>
+where
+	F: FnMut(&mut std::str::Chars) -> Option<u32>,
+{
+	move |line: &str| {
+		let mut line_iter = line.chars();
 
 		// We know from the problem statement that the number is only two digits.
-		let first_digit = find_digit();
-		let mut last_digit = None;
-
+		let tens = find_digit(&mut line_iter);
+		let mut ones = None;
 		// Keep going until there aren't any more digits on the line.
-		while let Some(d) = find_digit() {
-			last_digit = Some(d);
+		while let Some(digit) = find_digit(&mut line_iter) {
+			ones = Some(digit);
 		}
 
-		// If there was only one digit in the string, replace `last_digit` with the first one.
-		last_digit = last_digit.or(first_digit);
+		// If there was only one digit in the string, replace `tens` with `ones``.
+		ones = ones.or(tens);
+		tens.zip(ones).map(|(tens, ones)| tens * 10 + ones)
+	}
+}
 
-		first_digit.zip(last_digit).map(|(f, l)| {
-			unsafe {
-				// lmao imagine shifting characters together as a byte slice?
-				// Safe to unwrap since we assured above that these are digits.
-				std::str::from_utf8(&[f as u8, l as u8])
-					.unwrap_unchecked()
-					.parse()
-					.unwrap_unchecked()
-			}
-		})
+fn sum_lines(input: &str, f: impl FnMut(&mut std::str::Chars) -> Option<u32>) -> u32 {
+	input.lines().flat_map(calibrate(f)).sum()
+}
+
+#[aoc(day1, part1)]
+fn part1(input: &str) -> u32 {
+	sum_lines(input, |line| {
+		line.find(|chr| chr.is_digit(10))
+			// Safe to unwrap since we assured above that these are digits.
+			.map(|chr| unsafe { chr.to_digit(10).unwrap_unchecked() })
+	})
+}
+
+struct RotatingBuffer<const SIZE: usize> {
+	filled: usize,
+	inner: [u8; SIZE],
+}
+
+impl<const SIZE: usize> RotatingBuffer<SIZE> {
+	fn new() -> Self {
+		Self { filled: 0, inner: [0; SIZE] }
 	}
 
-	input.lines().flat_map(calibrate).sum()
+	fn clear(&mut self) {
+		self.inner.fill(0);
+		self.filled = 0;
+	}
+
+	/// * Sets `0..mid` to zero
+	fn stamp(&mut self, mid: usize) {
+		assert!(mid <= SIZE);
+		// SAFETY: The above assert! guarantees that the slice has a valid range.
+		let sli = unsafe { self.inner.get_mut(0..mid).unwrap_unchecked() };
+		sli.fill(0);
+		self.filled = SIZE - sli.len();
+	}
+
+	fn rotate_left_and_set(&mut self, val: u8) {
+		self.inner.rotate_left(1);
+
+		// SAFETY: The generic size constraint ensures that this is the end of the buffer.
+		let end = unsafe { self.inner.get_mut(SIZE - 1).unwrap_unchecked() };
+		*end = val;
+
+		self.filled += 1;
+		if self.filled >= SIZE {
+			self.filled = SIZE;
+		}
+	}
+
+	fn get_slice(&self) -> &[u8] {
+		// SAFETY: `self.filled` is guaranteed to never be larger than SIZE by `rotate_left_and_set`
+		unsafe {
+			&self
+				.inner
+				.get((SIZE - self.filled)..SIZE)
+				.unwrap_unchecked()
+		}
+	}
 }
 
 #[aoc(day1, part2)]
-fn part2(_input: &str) -> u32 {
-	0
+fn part2(input: &str) -> u32 {
+	const NUMSTR: [&'static str; 9] = [
+		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+	];
+
+	// Between "one" thru "nine", five is the max length of any string in-between.
+	let mut buf = RotatingBuffer::<5>::new();
+	sum_lines(input, move |line| loop {
+		let Some(next) = line.next() else {
+			buf.clear();
+			return None;
+		};
+
+		if next.is_digit(10) {
+			buf.rotate_left_and_set(0);
+			return Some(next.to_digit(10).unwrap());
+		}
+
+		let next = next as u8;
+
+		buf.rotate_left_and_set(next);
+		let bsli = std::str::from_utf8(buf.get_slice()).expect("Bad UTF8");
+
+		let mut to_digit = None;
+		for (i, s) in NUMSTR.into_iter().enumerate() {
+			if bsli.contains(s) {
+				// The minimum length of one of the words is three. Remove the first three
+				// elements of the buffer to prevent `bsli.contains` from returning true
+				// on the previously seen word.
+				buf.stamp(3);
+				to_digit = Some((i + 1) as u32);
+				break;
+			}
+		}
+
+		if to_digit.is_none() {
+			continue;
+		} else {
+			return to_digit;
+		}
+	})
 }
 
 #[cfg(test)]
